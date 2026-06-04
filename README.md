@@ -1,14 +1,24 @@
 # EXO + Claude Code Setup Guide
 
-Locally-hosted AI coding assistant using [EXO](https://github.com/exo-explore/exo) as the inference engine with [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) as the frontend.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![macOS](https://img.shields.io/badge/platform-macOS-blue)](https://www.apple.com/macos)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-green)](https://www.python.org)
+[![Node.js 18+](https://img.shields.io/badge/node-18+-green)](https://nodejs.org)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](https://github.com/kapilthakare-cyberpunk/exo-claude-code-setup/pulls)
 
-## System Requirements
+> **Run Claude Code against locally-hosted AI models via EXO — zero cloud API costs, full data privacy.**
 
-- **Hardware:** Apple Silicon Mac (M1/M2/M3/M4) with 16GB+ RAM
-- **Software:** macOS, Python 3.10+, Node.js 18+
-- **Storage:** 15-250GB free space depending on model size
+## About
 
-## Architecture
+Claude Code is Anthropic's powerful agentic coding tool, but it requires a cloud API key and sends code to their servers. This guide shows you how to redirect Claude Code to use [EXO](https://github.com/exo-explore/exo) — a local inference engine that runs open-source models on your own Mac.
+
+**Why?**
+- **Privacy** — your code never leaves your machine
+- **No API costs** — run unlimited queries
+- **Offline-capable** — work without internet
+- **Model freedom** — switch between any open-source model
+
+**How it works:** Claude Code speaks the Anthropic Messages API format. EXO speaks the OpenAI Chat API format. A lightweight Python proxy (included) translates between them seamlessly.
 
 ```
 ┌─────────────┐     Anthropic API      ┌──────────────────┐     OpenAI API      ┌─────────┐
@@ -17,18 +27,31 @@ Locally-hosted AI coding assistant using [EXO](https://github.com/exo-explore/ex
 └─────────────┘     Anthropic fmt      └──────────────────┘     OpenAI fmt     └─────────┘
 ```
 
-Claude Code speaks the Anthropic Messages API. EXO speaks the OpenAI Chat API. The proxy translates between them.
+## Table of Contents
 
----
+- [System Requirements](#system-requirements)
+- [Step 1: Install EXO](#step-1-install-exo)
+- [Step 2: Install Claude Code](#step-2-install-claude-code)
+- [Step 3: Start EXO](#step-3-start-exo)
+- [Step 4: Install Proxy Dependencies](#step-4-install-proxy-dependencies)
+- [Step 5: Start the Proxy](#step-5-start-the-proxy)
+- [Step 6: Configure Claude Code](#step-6-configure-claude-code)
+- [Step 7: Run](#step-7-run)
+- [Switching Models](#switching-models)
+- [Troubleshooting](#troubleshooting)
+- [Model Recommendations](#model-recommendations-by-ram)
+
+## System Requirements
+
+- **Hardware:** Apple Silicon Mac (M1/M2/M3/M4) with 16GB+ RAM
+- **Software:** macOS, Python 3.10+, Node.js 18+
+- **Storage:** 15–250 GB free space depending on model
 
 ## Step 1: Install EXO
 
 ```bash
-# Clone EXO
 git clone https://github.com/exo-explore/exo.git
 cd exo
-
-# Install
 pip install -e .
 ```
 
@@ -42,7 +65,7 @@ Verify:
 
 ```bash
 claude --version
-# Should print: 2.x.x (Claude Code)
+# → 2.x.x (Claude Code)
 ```
 
 ## Step 3: Start EXO
@@ -52,133 +75,27 @@ cd ~/exo
 python3 main.py
 ```
 
-This starts EXO's web UI at **http://127.0.0.1:52415**
-
-Open that URL in a browser and:
-1. Select/load a model (e.g., `mlx-community/Qwen3.5-27B-4bit`)
-2. Wait for download + load to complete
-3. Note the model ID shown in the UI
+Open **http://127.0.0.1:52415** in a browser:
+1. Select a model (e.g. `mlx-community/Qwen3.5-27B-4bit`)
+2. Wait for it to download and load
+3. Note the exact model ID — you'll need it later
 
 ## Step 4: Install Proxy Dependencies
-
-The proxy translates between Anthropic and OpenAI API formats.
 
 ```bash
 pip3 install httpx uvicorn fastapi
 ```
 
-## Step 5: Create the Proxy
+## Step 5: Start the Proxy
 
-Save this as `/tmp/claude_exo_proxy.py`:
-
-```python
-import json
-import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-import uvicorn
-
-app = FastAPI()
-EXO_BASE = "http://127.0.0.1:52415/v1"
-
-@app.post("/v1/messages")
-async def proxy_messages(request: Request):
-    body = await request.json()
-
-    system_text = None
-    messages = []
-    for msg in body.get("messages", []):
-        if msg.get("role") == "system":
-            system_text = msg.get("content", "")
-        else:
-            messages.append(msg)
-
-    openai_body = {
-        "model": body.get("model", ""),
-        "messages": messages,
-        "max_tokens": body.get("max_tokens", 4096),
-        "stream": body.get("stream", False),
-        "temperature": body.get("temperature", 0.7),
-    }
-    if system_text:
-        openai_body["messages"].insert(0, {"role": "system", "content": system_text})
-
-    headers = {
-        "Authorization": "Bearer x",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        if openai_body["stream"]:
-            req = client.post(
-                f"{EXO_BASE}/chat/completions",
-                json=openai_body,
-                headers=headers,
-            )
-            resp = await req
-
-            async def stream_transform():
-                prefix = 'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"' + body.get("model", "") + '","stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\n'
-                yield prefix
-
-                full_text = ""
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-                        chunk = json.loads(line[6:])
-                        delta = chunk["choices"][0].get("delta", {})
-                        if delta.get("content"):
-                            text = delta["content"]
-                            full_text += text
-                            yield f'data: {{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":{json.dumps(text)}}}}}\n\n'
-                        if chunk["choices"][0].get("finish_reason"):
-                            finish = chunk["choices"][0]["finish_reason"]
-                            yield f'data: {{"type":"message_delta","delta":{{"stop_reason":"{finish}","stop_sequence":null}},"usage":{{"output_tokens":{len(full_text.split())}}}}}\n\n'
-
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                stream_transform(),
-                media_type="text/event-stream",
-                headers={
-                    "Content-Type": "text/event-stream",
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                },
-            )
-        else:
-            resp = await client.post(f"{EXO_BASE}/chat/completions", json=openai_body, headers=headers)
-            data = resp.json()
-            choice = data["choices"][0]
-            anthropic_resp = {
-                "id": data.get("id", ""),
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": choice["message"]["content"]}],
-                "model": data["model"],
-                "stop_reason": choice.get("finish_reason", "end_turn"),
-                "usage": {
-                    "input_tokens": data["usage"].get("prompt_tokens", 0),
-                    "output_tokens": data["usage"].get("completion_tokens", 0),
-                },
-            }
-            return JSONResponse(content=anthropic_resp)
-
-@app.get("/v1/models")
-async def list_models():
-    return {
-        "data": [
-            {
-                "id": body.get("model", ""),
-                "object": "model",
-                "created": 1677610602,
-                "owned_by": "exo",
-            }
-        ]
-    }
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8080, log_level="info")
+```bash
+python3 proxy.py
 ```
+
+The proxy translates between the Anthropic Messages API (what Claude Code speaks) and the OpenAI Chat API (what EXO speaks). It handles:
+- System prompt conversion (`role: "system"` → `role: "system"` in OpenAI format)
+- Streaming response translation (SSE → SSE with format conversion)
+- Non-streaming request/response translation
 
 ## Step 6: Configure Claude Code
 
@@ -199,49 +116,54 @@ Create `~/.claude/settings.json`:
 }
 ```
 
+Replace `Qwen3.5-27B-4bit` with whatever model you loaded in EXO.
+
 ## Step 7: Run
 
-**Terminal 1 — EXO:**
-```bash
-cd ~/exo && python3 main.py
-```
+| Component | Command |
+|-----------|---------|
+| **EXO** | `cd ~/exo && python3 main.py` |
+| **Proxy** | `python3 proxy.py` |
+| **Claude Code** | `claude` |
 
-**Terminal 2 — Proxy:**
-```bash
-python3 /tmp/claude_exo_proxy.py
-```
-
-**Terminal 3 — Claude Code:**
-```bash
-claude
-```
+Open three terminals (or use tmux) and run each command.
 
 ## Switching Models
 
 1. Open EXO web UI at http://127.0.0.1:52415
-2. Select a new model (wait for download + load)
-3. Update the model IDs in `~/.claude/settings.json`
-4. Restart the proxy (`pkill -f claude_exo_proxy && python3 /tmp/claude_exo_proxy.py`)
+2. Select and load a new model
+3. Update model IDs in `~/.claude/settings.json`
+4. Restart the proxy: `pkill -f proxy.py && python3 proxy.py`
 
 ## Troubleshooting
 
-### "API Error: 422 role system"
-The proxy is not running. Start it with `python3 /tmp/claude_exo_proxy.py`.
-
-### "Connection refused"
-EXO is not running. Start it with `cd ~/exo && python3 main.py`.
-
-### Model stuck/weak responses
-The model is too small for the task. Switch to a larger coding model (Qwen3.5-27B-4bit or better).
-
-### "Address already in use" on port 8080
-Kill the existing proxy: `pkill -f claude_exo_proxy`
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `API Error: 422 role system` | Proxy not running | `python3 proxy.py` |
+| `Connection refused` | EXO not running | `cd ~/exo && python3 main.py` |
+| `Address already in use` on 8080 | Proxy already running | `pkill -f proxy.py` or use `lsof -i :8080` to find PID and kill it |
+| Model gives weak/truncated responses | Model too small | Switch to a larger coding model |
+| `Not logged in` banner | Claude Code can't reach Anthropic auth | **Cosmetic only** — it still works; ignore |
 
 ## Model Recommendations by RAM
 
-| RAM | Best coding model | RAM usage |
-|-----|------------------|-----------|
-| 16GB | Qwen3.5-27B-4bit | ~15GB |
-| 24GB | Qwen3.5-27B-4bit or Qwen3.5-35B-A3B-4bit | ~15-19GB |
-| 32GB | Qwen3-Coder-Next-4bit | ~43GB |
-| 64GB+ | Qwen3-Coder-480B-A35B-8bit or DeepSeek-V3.2-8bit | ~276-720GB |
+| RAM | Best for coding | RAM usage | Disk |
+|-----|----------------|-----------|------|
+| 16 GB | `Qwen3.5-27B-4bit` | ~15 GB | ~15 GB |
+| 24 GB | `Qwen3.5-27B-4bit` or `Qwen3.5-35B-A3B-4bit` | ~15–19 GB | ~15–19 GB |
+| 32 GB | `Qwen3-Coder-Next-4bit` | ~43 GB | ~43 GB |
+| 48 GB+ | `Qwen3-Coder-480B-A35B-4bit` | ~276 GB | ~276 GB |
+| 64 GB+ | `DeepSeek-V3.2-4bit` | ~360 GB | ~360 GB |
+
+## File Structure
+
+```
+exo-claude-code-setup/
+├── README.md        # This guide
+├── proxy.py         # Anthropic → OpenAI translation proxy
+└── LICENSE          # MIT
+```
+
+## License
+
+MIT
